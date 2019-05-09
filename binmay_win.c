@@ -2,6 +2,7 @@
 
 Binmay - command line binary search
 Copyright (C) 2004 - 2011 Sean Loaring
+Copyright (C) 2019 Slore
 
 This program is free software; you can redistribute it and/or
 modify it under the terms of the GNU General Public License
@@ -159,6 +160,26 @@ getopt(int argc, char *const argv[], const char *opts)
 }
 /******************************************/
 
+void set_search_str(struct masked_string *search, char *str)
+{
+    int i = 0;
+    char chr = '\0';
+    char buff[BUF_LEN] = {0};
+    masked_string_setstr(search, str);
+    /* case insensitive search */
+    if (strlen(str) >= 2 && ':' == str[1] && 'T' == str[0]) {
+        for (i = 0;i < search->length; i++) {
+            chr = search->string[i];
+            if ((chr >= 'a' && chr <= 'z') || (chr >= 'A' && chr <= 'Z')) {
+                search->mask[i] = 0xdf;
+            } else {
+                search->mask[i] = 0xff;
+            }
+        }
+        search->masklength = search->length;
+    }
+}
+
 int main(int argc, char **argv) // {{{
 {
     char c;
@@ -193,7 +214,7 @@ int main(int argc, char **argv) // {{{
             masked_string_setstr(replace, optarg);
             break;
         case 's':
-            masked_string_setstr(search, optarg);
+            set_search_str(search, optarg);
             break;
         case 'v':
             verbose++;
@@ -792,6 +813,7 @@ size_t process_string(char *dst, size_t dstlen, char *src, size_t srclen) // {{{
             return load_file(src + 2, dst, dstlen);
             break;
         case 't':
+        case 'T':
             if (dstlen < srclen - 2) {
                 fprintf(stderr, "Can't use >%s<, buffer overrun.\n", src);
                 exit(1);
@@ -841,6 +863,7 @@ void use() // {{{
             "\n"
             "      b:binary\n"
             "      t:text\n"
+            "      T:text (auto set mask for case insensitive searching)\n"
             "      h:hex\n"
             "      f:file_input\n"
             "\n"
