@@ -1,7 +1,7 @@
-/*
+/* {{{ license
 
 Binmay - command line binary search
-Copyright (C) 2004 Sean Loaring
+Copyright (C) 2004 - 2011 Sean Loaring
 
 This program is free software; you can redistribute it and/or
 modify it under the terms of the GNU General Public License
@@ -17,57 +17,62 @@ You should have received a copy of the GNU General Public License
 along with this program; if not, write to the Free Software
 Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
 
+Email: info@filewut.com
 
-email: sloaring at tec-man dot com
-
-If you use this software then send me an email and tell me!
+Web Site: http://www.filewut.com/spages/page.php/software/binmay
 
 Changes:
 
 
 050111: added patch from Bill Poser that allows input to be binary rather than hex
 
-*/
-
+}}} */
+// {{{ include
 #include <stdio.h>
 #include <unistd.h>
 #include <string.h>
 #include <stdlib.h>
 #include <ctype.h>
 #include <errno.h>
-
-//#define DEBUG(x) x;
+// }}}
+// {{{ defines
+//#define DEBUG(x) { x; };
 #define DEBUG(x) ;
-
-void use();
-
-FILE *infile;
-FILE *outfile;
 
 #define BUF_LEN 1024
 #define BLOCK_LEN 1024
-
-char infilename[BUF_LEN];
-char outfilename[BUF_LEN]; 
-
-unsigned char replace_string[BUF_LEN];
-int rlen=-1;
-unsigned char search_string[BUF_LEN];
-int slen=-1;
-
-unsigned char splice_string[BUF_LEN];
-
-unsigned char replace_mask[BUF_LEN];
-int rmlen=0;
-unsigned char search_mask[BUF_LEN];
-int smlen=-1;
-
-
-unsigned char pukebuf[BUF_LEN];
-int plen=-1;
+// }}}
 
 int verbose=0;
 int UseBinaryP = 0;
+char pukebuf[BUF_LEN];
+int plen=-1;
+int matches=0;
+
+// {{{ structs
+struct masked_string { // {{{
+	char string[BUF_LEN];
+	int length;
+	char mask[BUF_LEN];
+	int masklength;
+}; // }}}
+struct file_handle { // {{{
+	char filename[ BUF_LEN ];
+	FILE *file;
+}; // }}}
+struct buffer { // {{{
+	char buf[ BLOCK_LEN * 2 ];
+	int length;
+	int size;
+	int coffset; //number of bytes that have gone through buffer already
+}; // }}}
+struct buffered_handle { // {{{
+	struct buffer *buf;
+	struct file_handle *fh;
+}; // }}}
+// }}}
+// {{{ protos
+void use();
 
 void open_outfile( char *filename );
 void open_infile( char *filename );
@@ -79,547 +84,723 @@ int b_getchar();
 void do_search_replace();
 void fill_ibuf();
 void b_fwrite( unsigned char *buf, int len );
-void process_string( unsigned char *str, int *len );
+size_t process_string( char *dst, size_t dstlen, char *src, size_t srclen );
+void buffered_skip( struct buffered_handle *h, size_t skip ); 
+void buffered_setfile( struct buffered_handle *bh, char *filename, FILE *def, const char *mode ); 
 
-int matches=0;
+void file_handle_setfile( struct file_handle *fh, char *filename, FILE *def, const char *mode ); 
 
-int main( int argc, char **argv )
+struct masked_string * masked_string_new(); 
+void masked_string_setstr( struct masked_string *masked, char *str ); 
+void masked_string_setmask( struct masked_string *masked, char *mask ); 
+void masked_string_ensuremask( struct masked_string *masked ); 
+void masks_check( struct masked_string *search, struct masked_string *replace ); 
+int masked_string_isset( struct masked_string *masked ); 
+
+struct buffered_handle *buffered_handle_new( char *filename, FILE *def, const char *mode ); 
+struct file_handle *file_handle_new( char *filename, FILE *def, const char *mode ); 
+// }}}
+
+int main( int argc, char **argv ) // {{{
 {
-  char c;
+	char c;
 
-  infile=stdin;
-  outfile=stdout;
+	struct buffered_handle *in = buffered_handle_new( "-", stdin, "rb" );
+	struct file_handle *out = file_handle_new( "-", stdout, "wb" );
 
-  char options[] = "bvp:S:R:i:o:s:r:";
-  if( 1 == argc )
-  {
-	use();
+	struct masked_string *search = masked_string_new();
+	struct masked_string *replace = masked_string_new();
+
+//	infile=stdin;
+//	outfile=stdout;
+
+	char options[] = "bvp:S:R:i:o:s:r:";
+	if( 1 == argc ) {
+		use();
+		return 0;
+	}
+
+	while( (c=getopt( argc, argv, options )) >0 ) {
+		switch( c ) {
+			case 'b':
+				UseBinaryP = 1;
+				break;
+			case 'i':
+				buffered_setfile( in, optarg, stdin, "rb" );
+				break;
+			case 'o':
+				file_handle_setfile( out, optarg, stdout, "wb" );
+				break;
+			case 'r':
+				masked_string_setstr( replace, optarg );
+				break;
+			case 's':
+				masked_string_setstr( search, optarg );
+				break;
+			case 'v':
+				verbose++;
+				break;
+
+			case 'S':
+				masked_string_setmask( search, optarg );
+				break;
+
+			case 'R':
+				masked_string_setmask( replace, optarg );
+				break;
+
+			case 'p':
+				if( strlen( optarg ) > BUF_LEN ) {
+					fprintf(stderr, "The replace mask is longer than the buffer :(\n");
+					fprintf(stderr, "You might have to modify BUF_LEN and recompile...sorry!\n");
+					exit(1);
+				}
+				plen = process_string( pukebuf, BUF_LEN, optarg, strlen( optarg ) );
+				/*
+				strncpy( pukebuf, optarg, BUF_LEN );
+				process_string( pukebuf, &plen );
+				*/
+				break;
+
+			default:
+			{
+				fprintf(stderr, "Command line parser: I don't understand option '-%c'.\n",
+						(unsigned int)c );
+				fprintf(stderr, "Run with no options for help\n");
+				exit(1);
+			}
+		}
+	}
+
+
+	masked_string_ensuremask( search );
+	masks_check( search, replace );
+
+	if( masked_string_isset( search )  && -1 != plen ) {
+		perror( "I don't know how to puke and search at the same time.");
+	}
+
+	if( masked_string_isset( search ) ) {
+		do_search_replace( in, out, search, replace );
+
+		if( !masked_string_isset( replace ) ) {
+			printf("Matches: %d\n", matches);
+		}
+
+		if( verbose ) fprintf(stderr, " Done: %d matches.\n", matches );
+	}
+
+	if( -1 != plen ) {
+		if( verbose )fprintf( stderr, "Puking binary to output\n");
+		fflush( stderr );
+		if( 1 != fwrite( pukebuf, plen, 1, out->file ) ) {
+			fprintf(stderr, "Write error: \"%s\" :(\n", strerror( errno ));
+			exit(1);
+		}
+	}
+
 	return 0;
-  }
+} // }}}
 
-  while( (c=getopt( argc, argv, options )) >0 )
-  {
-    switch( c )
-    {
-      case 'b':
-	UseBinaryP = 1;
-	break;
-      case 'i':
-	strncpy( infilename, optarg, BUF_LEN);
-	open_infile( infilename );
-	break;
-      case 'o':
-	strncpy( outfilename, optarg, BUF_LEN );
-	open_outfile( outfilename );
-	break;
-      case 'r':
-	if( strlen( optarg ) > BUF_LEN )
-	{
-	  fprintf(stderr, "The replacement string is longer than the buffer :(\n");
-	  fprintf(stderr, "You might have to modify BUF_LEN and recompile...sorry!\n");
-	  exit(1);
-	}
-	strncpy( replace_string, optarg, BUF_LEN );
-	process_string( replace_string, &rlen );
-	break;
-      case 's':
-
-	if( strlen( optarg ) > BUF_LEN )
-	{
-	  fprintf(stderr, "The search string is longer than the buffer :(\n");
-	  fprintf(stderr, "You might have to modify BUF_LEN and recompile...sorry!\n");
-	  exit(1);
-	}
-	strncpy( search_string, optarg, BUF_LEN );
-	process_string( search_string, &slen );
-	break;
-
-      case 'v':
-	verbose++;
-	break;
-
-      case 'S':
-	if( strlen( optarg ) > BUF_LEN )
-	{
-	  fprintf(stderr, "The search mask is longer than the buffer :(\n");
-	  fprintf(stderr, "You might have to modify BUF_LEN and recompile...sorry!\n");
-	  exit(1);
-	}
-	strncpy( search_mask, optarg, BUF_LEN );
-	process_string( search_mask, &smlen );
-	break;
-
-
-      case 'R':
-	if( strlen( optarg ) > BUF_LEN )
-	{
-	  fprintf(stderr, "The replace mask is longer than the buffer :(\n");
-	  fprintf(stderr, "You might have to modify BUF_LEN and recompile...sorry!\n");
-	  exit(1);
-	}
-	strncpy( replace_mask, optarg, BUF_LEN );
-	process_string( replace_mask, &rmlen );
-	break;
-
-      case 'p':
-	if( strlen( optarg ) > BUF_LEN )
-	{
-	  fprintf(stderr, "The replace mask is longer than the buffer :(\n");
-	  fprintf(stderr, "You might have to modify BUF_LEN and recompile...sorry!\n");
-	  exit(1);
-	}
-	strncpy( pukebuf, optarg, BUF_LEN );
-	process_string( pukebuf, &plen );
-	break;
-
-      default:
-      {
-	fprintf(stderr, "Command line parser: I don't understand option '-%c'.\n", (unsigned int)c );
-	fprintf(stderr, "Run with no options for help\n");
-	exit(1);
-      }
-    }
-  }
-
-
-  //make a search mask if the user doesn't specify one
-  if( slen > 0 && -1 == smlen )
-  {
-    smlen = slen;
-    memset( search_mask, 0xff, smlen );
-  }
-
-
-  //some sanity checks
-
-  if( slen != smlen )
-  {
-    fprintf(stderr, "Search mask length != search string length, I don't know what do do!\n");
-    exit(1);
-  }
-
-  if( -1 != slen && -1 != rlen && ( rmlen > rlen || rmlen > slen ) )
-  {
-    fprintf(stderr,
-      "Replace mask is longer than either either the search string or replacement string,\n"
-      "ignoring extra mask.\n"
-    );
-    rmlen = (rlen>slen)?slen:rlen;
-  }
-
-  if( -1 != slen && -1 != plen )
-  {
-    perror( "I don't know how to puke and search at the same time.");
-  }
-
-  if( -1 != slen )
-  {
-    do_search_replace();
-
-    if( verbose ) fprintf(stderr, " Done: %d matches.\n", matches );
-  }
-
-  if( -1 != plen )
-  {
-    if( verbose )fprintf( stderr, "Puking binary to output\n");
-    fflush( stderr );
-    if( 1 != fwrite( pukebuf, plen, 1, outfile ) )
-    {
-      fprintf(stderr, "Write error: \"%s\" :(\n", strerror( errno ));
-      exit(1);
-    }
-  }
-
-
-  return 0;
-}
-
-
-void open_infile( char *filename )
+void *f_malloc( size_t size ) // {{{ returns malloc()d buffer or aborts
 {
+	void *r;
+	if( NULL == ( r = (struct input*)malloc( size ) ) ) {
+		fprintf(stderr, "Error allocating %d bytes.\n", size );
+		abort();
+	}
 
-  fprintf( stderr, "Reading from  %s...\n", filename );
-  if( NULL == ( infile = fopen( filename, "rb" ) ) )
-  {
-    fprintf(stderr, "Error opening input file %s\n", filename );
-    exit(1);
-  }
-}
+	return r;
+} // }}}
 
-
-void open_outfile( char *filename )
+struct buffer *buffer_new() // {{{
 {
+	struct buffer *r;
 
-  if( verbose ) fprintf( stderr, "Writing to %s...\n", filename );
-  if( NULL == ( outfile = fopen( filename, "wb" ) ) )
-  {
-    fprintf(stderr, "Error opening output file %s\n", filename );
-    exit(1);
-  }
-}
+	r = (struct buffer*)f_malloc( sizeof( struct buffer ) );
 
-//how many times have I written this stupid function?
-void hexdump( FILE *out, unsigned char *buf, int len )
+	r->length = 0;
+	r->size = BLOCK_LEN * 2;
+	r->coffset = 0;
+
+	return r;
+} // }}}
+
+void file_handle_setfile( struct file_handle *fh, char *filename, FILE *def, const char *mode ) // {{{
 {
-  int i=0;
+	if( strlen( filename ) > BUF_LEN ) {
+		fprintf(stderr, "Input file name too large for buffer.\n");
+		abort();
+	}
 
-  for( i=0; i<len; i++ )
-  {
-    fprintf( out, "%02x ", (unsigned int)buf[i] );
-  }
-
-  fprintf( out, "\n" );
-}
-
-unsigned char ssbuf[BUF_LEN];
-
-void do_search_replace()
+	if( 0 == strcmp( filename, "-") ) {
+		fh->file = def;
+	} else {
+		if( verbose ) fprintf( stderr, "Writing to %s...\n", filename );
+		if( NULL == ( fh->file = fopen( filename, mode ) ) ) {
+			fprintf(stderr, "Error opening file %s\n", filename );
+			exit(1);
+		}
+	}
+} // }}}
+struct file_handle *file_handle_new( char *filename, FILE *def, const char *mode ) // {{{
 {
-  int ssoff=0;
-  int chr;
-  long unsigned int offset=0;
-  for ( offset=0; -1 != ( chr = b_getchar( ) ); offset++ )
-  {
-    ssbuf[ssoff] = (unsigned char)chr;
+	struct file_handle *r;
 
-    DEBUG(fprintf(stderr, "ssbuf[%d] == %x\n", ssoff, chr );)
+	r = (struct file_handle*)f_malloc( sizeof( struct file_handle ) );
+	file_handle_setfile( r, filename, def, mode );
+	return r;
+} // }}}
 
-    if( ( ssbuf[ssoff] & search_mask[ssoff] ) != ( search_string[ssoff] & search_mask[ssoff] ) )
-    {
-      DEBUG(fprintf( stderr, "   unmatch, dump %d\n", ssoff + 1 );)
-      b_fwrite( ssbuf, ssoff + 1 );
-      ssoff=0;
-    }
-    else
-    {
-      ssoff++;
-      DEBUG(fprintf(stderr, "Matched %d of search string\n", ssoff );)
+void buffered_setfile( struct buffered_handle *bh, char *filename, FILE *def, const char *mode ) // {{{
+{
+	file_handle_setfile( bh->fh, filename, def, mode );
+} // }}}
+struct buffered_handle *buffered_handle_new( char *filename, FILE *def, const char *mode ) // {{{
+{
+	struct buffered_handle *r;
 
-      if( ssoff == slen )
-      {
-	DEBUG(fprintf(stderr, "Matched entire search string.  Replacement time.\n");)
+	r = (struct buffered_handle*)f_malloc( sizeof( struct buffered_handle ) );
+
+	r->fh = file_handle_new( filename, def, mode );
+	r->buf = buffer_new();
+
+	return r;
+
+} // }}}
+
+struct masked_string * masked_string_new() // {{{
+{
+	struct masked_string *r = f_malloc( sizeof( struct masked_string ) );
+
+	r->length = -1;
+	r->masklength = -1;
+
+	return r;
+} // }}}
+void masked_string_setstr( struct masked_string *masked, char *str ) // {{{
+{
+	if( strlen( str ) > BUF_LEN ) {
+		fprintf( stderr, "Mask string is longer than buffer.\n");
+		exit(1);
+	}
+
+	masked->length = process_string( masked->string, BUF_LEN, str, strlen( str ) );
+
+	DEBUG( fprintf(stderr, "Setting masked string >%s< -> >%s<, %d\n", str, masked->string, masked->length) );
+
+	/*
+	strncpy( masked->string, str, BUF_LEN );
+	process_string( masked->string, &(masked->length ) );
+	*/
+} // }}}
+void masked_string_setmask( struct masked_string *masked, char *mask ) // {{{
+{
+	if( strlen( mask ) > BUF_LEN ) {
+		fprintf( stderr, "Mask string is longer than buffer.\n");
+		exit(1);
+	}
+
+	masked->masklength = process_string(  masked->mask, BUF_LEN, mask, strlen( mask ) );
+
+	/*
+	strncpy( masked->mask, mask, BUF_LEN );
+	process_string( masked->mask, &(masked->masklength ) );
+	*/
+} // }}}
+void masked_string_ensuremask( struct masked_string *masked ) // {{{ If a mask hasn't been set then set it to 0xff * length
+{
+	if( masked->length > 0 && -1 == masked->masklength ) {
+		masked->masklength = masked->length;
+		memset( masked->mask, 0xff, masked->length );
+	}
+
+	if( masked->length != masked->masklength ) {
+		fprintf(stderr, "Search mask length (%d) != search string length (%d).\n",
+				masked->length, masked->masklength );
+		exit(1);
+	}
+} // }}}
+int masked_string_isset( struct masked_string *masked ) // {{{
+{
+	if( -1 == masked->length )
+		return 0;
+	else
+		return 1;
+} // }}}
+int masked_string_match( struct masked_string *masked, size_t offset, char *buf ) // {{{
+{
+	int i;
+	for( i=0; i < masked->length; i++ ) {
+		char chr = buf[i];
+		if( ( chr & masked->mask[i] ) != ( masked->string[i] & masked->mask[i] ) ) {
+			return 0;
+		}
+	}
+
 	matches++;
 
-	if( verbose )
-	{
-	  fprintf( stderr, "match: 0x%08lx: ", offset );
-	  hexdump( stderr, ssbuf, slen );
+	return 1;
+
+} // }}}
+int masked_string_seek( struct masked_string *masked, struct buffer *buf ) // {{{ search for buf in masked; out: offset or -1
+{
+	int i;
+	for( i=0; buf->length - i >= masked->length; i++ ) {
+		if( masked_string_match( masked, i, buf->buf + i ) ) {
+			return i;
+		}
 	}
 
-	if( rlen >= 0 )
-	{
-	  int i=0;
-	  if( 0 != rmlen )
-	  {
-	    //mask what we can
-	    for( i=0; i< rmlen; i++ )
-	      splice_string[i] = ((replace_string[i] & replace_mask[i]) | (ssbuf[i] & (~replace_mask[i])));
+	return -1;
+} // }}}
+void masks_check( struct masked_string *search, struct masked_string *replace ) // {{{
+{
+	if( -1 != search->length && -1 != replace->length &&
+			( replace->masklength > replace->length || replace->masklength > search->length ) ) {
+		fprintf(stderr,
+			"Replace mask is longer than either either the search string or replacement string,\n"
+			"ignoring extra mask.\n"
+		);
+		replace->masklength= ( replace->length>search->length)?search->length:replace->length;
+	}
+} // }}}
 
-	    if( verbose > 3 )
-	    {
-	      fprintf(stderr, "source string:  ");
-	      hexdump(stderr, ssbuf, ssoff );
+void hexdump( FILE *out, char *buf, int len ) // {{{
+{
+	int i=0;
 
-	      fprintf(stderr, "replace string: ");
-	      hexdump(stderr, replace_string, rlen );
-
-	      fprintf(stderr, "replace mask:   ");
-	      hexdump(stderr, replace_mask, rmlen );
-
-
-	      fprintf(stderr, "result:         ");
-	      hexdump(stderr, splice_string, rmlen );
-
-	    }
-
-	    b_fwrite( splice_string, rmlen );
-	  }
-
-	  DEBUG(fprintf( stderr, "** Writing %d\n", rlen - rmlen );)
-	  b_fwrite( replace_string + rmlen, rlen - rmlen );
-
-	  if( verbose > 2 )
-	  {
-	    fprintf( stderr, "replacement (mask): 0x%08lx: ", offset );
-	    hexdump( stderr, splice_string, rmlen );
-
-	    fprintf( stderr, "replacement (nonmask): 0x%08lx: ", offset );
-	    hexdump( stderr, replace_string + rmlen, rlen - rmlen );
-	  }
+	for( i=0; i<len; i++ ) {
+		fprintf( out, "%02x ", (unsigned char)buf[i] );
 	}
 
-	ssoff=0;
-      }
-    }
+	fprintf( out, "\n" );
+} // }}}
 
-  }
-
-  b_fwrite( ssbuf, ssoff );
-  ssoff=0;
-  flush_outbuf();
-  fclose( outfile );
-  fclose( infile );
-  
-}
-
-#define OB_LENGTH BLOCK_LEN * 2
-
-unsigned char outbuf[OB_LENGTH];
-int obused=0;
-
-unsigned char inbuf[ BLOCK_LEN ];
-int iboff=0;
-int ibavail=0;
-
-int b_getchar()
+void hexdumpline( FILE *out, char *buf, int len ) // {{{
 {
-  int result;
-  if( iboff >= ibavail )
-    fill_ibuf();
+	int i=0;
 
-  if( iboff >= ibavail ) return -1;
+	for( i=0; i<len; i++ ) {
+		fprintf( out, "%02x ", (unsigned char)buf[i] );
+	}
+} // }}}
 
-  result=inbuf[iboff];
-
-DEBUG(  fprintf(stderr, "b_getchar() returning %c\n", result ); )
-
-  iboff++;
-
-  return result;
-}
-
-void dump_buf( char*buf, int len)
-{
-  int i;
-  fprintf(stderr, "DUMPING BUFFER------------------------------\n");
-  fprintf( stderr, "%d >", len );
-  for( i=0; i<len; i++)
-  {
-    fprintf( stderr, "%c", buf[i] );
-  }
-
-
-  fprintf( stderr, "<" );
-
-  fprintf( stderr, "\n");
-
-  fprintf(stderr, "--------------------------------------------------\n");
-}
-
-//WARNING: only call this if the buffer is ALL USED UP
-void fill_ibuf()
-{
-  DEBUG(fprintf(stderr, "fill_ibuf() pre...%d %d\n", iboff, ibavail );)
-  if( iboff != ibavail )
-  {
-    fprintf(stderr, "Odd, trying to fill_ibuf() before it needs it? %d\n", iboff);
-    exit(1);
-  }
-
-  ibavail = fread( inbuf, 1, BLOCK_LEN, infile );
-
-  iboff=0;
-
-  DEBUG(fprintf(stderr, "fill_ibuf() post...%d %d\n", iboff, ibavail ););
-
-  DEBUG( dump_buf( inbuf, ibavail ); )
-
-}
-
-void b_fwrite( unsigned char *buf, int len )
+void buffer_flush( struct buffered_handle *in, struct file_handle *out, size_t length ) // {{{ flush length bytes from in to out
 {
 
-  DEBUG( fprintf(stderr, "b_fwrite called on: "); )
-  DEBUG( dump_buf( buf, len ); )
-  if( 0 == len ) return;
-  if( len + obused > OB_LENGTH )
-    flush_outbuf_block();
+	if( 0 == length ) return;
+	if( in->buf->length < length ) {
+		fprintf(stderr, "Attempt to overrun buffer.  Please report this bug.\n");
+		abort();
+	}
 
-  memcpy( outbuf + obused, buf, len );
-  obused += len;
+	if( 1 != fwrite( in->buf->buf, length, 1, out->file ) ) {
+		fprintf(stderr, "Error writing %d bytes: %s\n", length, strerror( errno ) );
+		abort();
+	}
 
-}
 
-void flush_outbuf_block()
+	buffered_skip( in, length );
+
+} // }}}
+void masked_replace( struct buffered_handle *in, struct file_handle *out, struct masked_string *replace ) // {{{
 {
-  if( 1 != fwrite( outbuf, BLOCK_LEN, 1, outfile ) )
-  {
-    fprintf(stderr, "Nuts, write error (%s)!\n", strerror( errno ) );
-    exit(1);
-  }
+	char replace_buf[BUF_LEN * 2];
+	if( -1 == replace->masklength ) {
+		if( replace->length > 0 ) {
+			if( 1 != fwrite( replace->string, replace->length, 1, out->file ) ) {
+				fprintf(stderr, "Error writing %d bytes: %s\n", replace->length, strerror( errno ) );
+				abort();
+			}
+		}
+	} else {
+		if( in->buf->length < replace->masklength ) {
+			fprintf(stderr, "Input buffer (%d) is not long enough for replacement (%d).\n",
+					in->buf->length, replace->masklength);
+			exit(1);
+		}
 
-  obused -= BLOCK_LEN;
+		int i;
 
-  memcpy( outbuf, outbuf + BLOCK_LEN, obused );
-}
+		for( i=0; i < replace->length; i++ ) {
+			if( i < replace->masklength ) {
+				replace_buf[i] = ((replace->string[i] & replace->mask[i]) | (in->buf->buf[i] & (~replace->mask[i])));
+			} else {
+				replace_buf[i] = replace->string[i];
+			}
+		}
 
-void flush_outbuf()
+		if( 1 != fwrite( replace_buf, replace->length, 1, out->file ) ) {
+			fprintf(stderr, "Error writing %d bytes: %s\n", replace->length, strerror( errno ) );
+			abort();
+		}
+	}
+
+} // }}}
+void buffered_skip( struct buffered_handle *h, size_t skip ) // {{{
 {
-  int result;
-  if( 0 != obused && 1 != (result=fwrite( outbuf, obused, 1, outfile ) ) )
-  {
-    fprintf(stderr, "Nuts, write error (obused=%d, result=%d, err=%s)!\n", obused, result, strerror( errno ) );
-  }
-}
+	if( skip < 0 || skip > h->buf->length ) {
+		fprintf(stderr, "Tried to advance buffer out of range %d by %d bytes.\n",
+				h->buf->length, skip);
+		abort();
+	}
 
 
-int hval( char c )
+
+	memmove( h->buf->buf, h->buf->buf + skip, h->buf->length - skip );
+
+	h->buf->length -= skip;
+	h->buf->coffset += skip;
+} // }}}
+int buffered_read( struct buffered_handle *h, int length ) // {{{
 {
-  switch( c )
-  {
-    case '0': return 0;
-    case '1': return 1;
-    case '2':return 2;
-    case '3':return 3;
-    case '4':return 4;
-    case '5':return 5;
-    case '6':return 6;
-    case '7':return 7;
-    case '8':return 8;
-    case '9':return 9;
-    case 'A':return 10;
-    case 'B':return 11;
-    case 'C':return 12;
-    case 'D':return 13;
-    case 'E':return 14;
-    case 'F':return 15;
-    default:
-      fprintf(stderr, "INTERNAL ERROR: hval() got something weird: \"%c\" == %d \n", (unsigned int)c, (unsigned int)c);
-      exit(1);
-    
-  }
-}
+	if( length > h->buf->size - h->buf->length ) {
+		fprintf(stderr, "Attempt to read (%d) more than there was room for (%d - %d = %d).\n",
+				length, h->buf->size, h->buf->length, h->buf->size - h->buf->length);
+		abort();
+	}
 
-int
-isbdigit(char x)
+	int i = fread( h->buf->buf + h->buf->length, 1, length, h->fh->file );
+
+	if( i < 0 ) {
+		fprintf(stderr, "Read error: %s\n", strerror( errno ) );
+		exit(1);
+	}
+
+	h->buf->length+=i;
+
+	return i;
+
+} // }}}
+void do_search_replace( struct buffered_handle *in, struct file_handle *out, struct masked_string *search, struct masked_string *replace ) // {{{
 {
-  switch(x)
-    {
-    case '0':
-    case '1':
-      return (1);
-    default:
-      return(0);
-  }
-}
 
-void
-process_bin_string( unsigned char *str, int *len )
+	while( buffered_read( in, BUF_LEN ) ) {
+		while( in->buf->length >= search->length ) {
+			int found;
+			if( -1 != ( found = masked_string_seek( search, in->buf ) ) ) {
+				if( masked_string_isset( replace ) ) {
+					buffer_flush( in, out, found );
+					masked_replace( in, out, replace );
+				} else {
+					buffered_skip( in, found );
+					printf("0x%x:", in->buf->coffset );
+					hexdumpline( stdout, in->buf->buf, search->length);
+					printf("\n");
+				}
+				buffered_skip( in, search->length );
+			} else { // couldn't find the search string in the buffer, skip ahead
+				if( masked_string_isset( replace ) ) {
+					buffer_flush( in, out, in->buf->length - search->length + 1 );
+				} else {
+					buffered_skip( in, in->buf->length - search->length + 1 );
+				}
+			}
+		}
+	}
+
+
+	if( masked_string_isset( replace ) ) {
+		buffer_flush( in, out, in->buf->length );
+	} else {
+		buffered_skip( in, in->buf->length );
+	}
+
+
+} // }}}
+
+int hval( char c ) // {{{ in: char '0', '1', ... , 'f'; out: int 0, 1, ... , 15
 {
-  int off;
-  int noff;
+	switch( c ) {
+		case '0': return 0;
+		case '1': return 1;
+		case '2':return 2;
+		case '3':return 3;
+		case '4':return 4;
+		case '5':return 5;
+		case '6':return 6;
+		case '7':return 7;
+		case '8':return 8;
+		case '9':return 9;
+		case 'A':return 10;
+		case 'B':return 11;
+		case 'C':return 12;
+		case 'D':return 13;
+		case 'E':return 14;
+		case 'F':return 15;
+		default:
+		fprintf(stderr, "INTERNAL ERROR: hval() got something weird: \"%c\" == %d \n",
+				(unsigned int)c, (unsigned int)c);
+		exit(1);
 
-  for( off=0; off<strlen( str ); off++ )
-  {
-    //clean out crap
-    while( str[off] != 0 && ! isbdigit(str[off]) ) {
-      for ( noff=off;str[noff] !=0; noff++ ){
-	str[noff] = str[noff+1];
-      }
-    }
-  }
-  DEBUG( fprintf(stderr, "Cleanstr: %s\n", str ); )
-
-  *len = strlen(str); 
-  if( *len % 8 != 0 ){
-    fprintf(stderr, "Error: invalid binary string: %s, length must be a multiple of 8.\n", str);
-    exit(1);
-  }
-  *len = *len/8;
-  DEBUG(fprintf(stderr, "len: %d\n", *len );)
-
-  for( noff=0; noff < *len; noff++) {
-    str[noff] =
-      ((str[noff*2]  -0x30) << 7) +
-      ((str[noff*2+1]-0x30) << 6) +
-      ((str[noff*2+2]-0x30) << 5) +
-      ((str[noff*2+3]-0x30) << 4) +
-      ((str[noff*2+4]-0x30) << 3) +
-      ((str[noff*2+5]-0x30) << 2) +
-      ((str[noff*2+6]-0x30) << 1) +
-        str[noff*2+7]-0x30;
-
-    DEBUG(fprintf( stderr, "noff: %d\n", noff );)
-    DEBUG(fprintf(stderr, "A val: %x\n", (unsigned int)str[noff]);)
-  }
-}
-
-void
-process_hex_string( unsigned char *str, int *len )
+	}
+} // }}}
+int isbdigit(char x) // {{{
 {
-  int off;
-  int noff;
-
-  for( off=0; off<strlen( str ); off++ )
-  {
-    //clean out crap
-    while( str[off] != 0 && ! isxdigit( str[off] ) )
-    {
-      for ( noff=off;str[noff] !=0; noff++ )
-      {
-	str[noff] = str[noff+1];
-      }
-    }
-
-    //ucase the string
-    str[off] = toupper(str[off]);
-  }
-
-  *len = strlen( str );
-
-  DEBUG( fprintf(stderr, "Cleanstr: %s\n", str ); )
-
-  //convert to values
-  if( *len % 2 != 0 )
-  {
-    fprintf(stderr, "Error: invalid hex string: %s, length must be a multiple of two.\n", str );
-    exit(1);
-  }
-
-  *len = *len/2;
-
-  DEBUG(fprintf(stderr, "len: %d\n", *len );)
-
-  for( noff=0; noff<*len; noff++)
-  {
-    str[noff] = (hval( str[noff*2] ) << 4) + hval( str[noff*2+1] );
-
-    DEBUG(fprintf( stderr, "noff: %d\n", noff );)
-    DEBUG(fprintf(stderr, "A val: %x\n", (unsigned int)str[noff]);)
-  }
-
-  DEBUG( fprintf(stderr, "process_string() Done\n"); );
-}
-
-void
-process_string( unsigned char *str, int *len )
+	switch(x)
+	{
+		case '0':
+		case '1':
+			return (1);
+		default:
+			return(0);
+	}
+} // }}}
+size_t process_bin_string( char *dst, size_t dstlen, char *src, size_t srclen ) // {{{ convert ascii binary to bytes
 {
-  if(UseBinaryP) process_bin_string(str,len);
-  else process_hex_string(str,len);
-}
+	int off;
+	int noff;
 
-void use()
+	char cleanbuf[BUF_LEN];
+	size_t nclean = 0;
+	int r=0;
+
+	for( off=0; off<srclen; off++ ) {
+		//clean out crap
+		if( isbdigit( src[off] ) ) {
+			if( nclean >= sizeof( cleanbuf ) - 1 ) {
+				fprintf(stderr, "Clean binary string is larger than buffer.\n");
+				exit(1);
+			}
+			cleanbuf[nclean] = src[off];
+			nclean++;
+		}
+		/*
+		while( src[off] != 0 && ! isbdigit(str[off]) ) {
+			for ( noff=off;src[noff] !=0; noff++ ){
+				dst[noff] = src[noff+1];
+			}
+		}
+		*/
+	}
+	cleanbuf[nclean] = '\0';
+	DEBUG( fprintf(stderr, "Cleanstr: %s\n", cleanbuf ); )
+
+	//*len = strlen(str); 
+	if( nclean % 8 != 0 ){
+		fprintf(stderr, "Error: invalid binary string: %s, length must be a multiple of 8.\n", src );
+		exit(1);
+	}
+
+	r = nclean/8;
+	//*len = *len/8;
+	DEBUG(fprintf(stderr, "result len: %d\n", r ));
+
+	if( r > dstlen ) {
+		fprintf(stderr, "Error: destination buffer is too small.\n");
+		exit(1);
+	}
+
+	for( noff=0; noff * 8 < nclean; noff++) {
+		int start = noff * 8;
+		dst[noff] =
+		((cleanbuf[start]  -0x30) << 7) +
+		((cleanbuf[start+1]-0x30) << 6) +
+		((cleanbuf[start+2]-0x30) << 5) +
+		((cleanbuf[start+3]-0x30) << 4) +
+		((cleanbuf[start+4]-0x30) << 3) +
+		((cleanbuf[start+5]-0x30) << 2) +
+		((cleanbuf[start+6]-0x30) << 1) +
+		cleanbuf[start+7]-0x30;
+
+		/*
+		DEBUG(fprintf( stderr, "noff: %d\n", noff );)
+		DEBUG(fprintf(stderr, "A val: %x\n", (unsigned int)dst[noff]);)
+		*/
+
+
+		DEBUG(
+				fprintf(stderr, "%d %c%c%c%c%c%c%c%c -> ",
+					noff,
+			cleanbuf[start]  ,
+			cleanbuf[start+1],
+			cleanbuf[start+2],
+			cleanbuf[start+3],
+			cleanbuf[start+4],
+			cleanbuf[start+5],
+			cleanbuf[start+6],
+			cleanbuf[start+7] );
+		)
+
+
+		DEBUG(fprintf(stderr, "A val: %x\n", (unsigned int)(unsigned char)dst[noff]);)
+	}
+
+	DEBUG(
+			fprintf(stderr, "process_bin_string() >%s< ->", src);
+			hexdumpline( stderr, dst, r );
+			fprintf(stderr, "\n");
+	     );
+
+	return r;
+} // }}}
+size_t process_hex_string( char *dst, size_t dstlen, char *src, size_t srclen ) // {{{
+{
+	int off;
+	int noff;
+	int r;
+
+	char cleanbuf[BUF_LEN];
+	size_t nclean = 0;
+
+
+	for( off=0; off<srclen; off++ ) {
+		//clean out crap
+		if( isxdigit( src[off] ) ) {
+			if( nclean >= sizeof( cleanbuf ) - 1 ) {
+				fprintf(stderr, "Clean binary string is larger than buffer.\n");
+				exit(1);
+			}
+			cleanbuf[nclean] = toupper(src[off]);
+			nclean++;
+		}
+	}
+
+	/*
+	for( off=0; off<srclen; off++ ) {
+		//clean out crap
+		if( isxdigit( src[off] ) ) {
+
+		}
+		while( str[off] != 0 && ! isxdigit( str[off] ) ) {
+			for ( noff=off;str[noff] !=0; noff++ ) {
+				str[noff] = str[noff+1];
+			}
+		}
+		//ucase the string
+		str[off] = toupper(str[off]);
+	}
+	*/
+
+	//*len = strlen( str );
+
+	cleanbuf[nclean] = '\0';
+	DEBUG( fprintf(stderr, "Cleanstr(%d): >%s< -> >%s<\n", nclean, src, cleanbuf ); )
+
+	//convert to values
+	if( nclean % 2 != 0 ) {
+		fprintf(stderr, "Error: invalid hex string: %s, length must be a multiple of two.\n", src );
+		exit(1);
+	}
+
+	//*len = *len/2;
+	r = nclean/2;
+
+	if( r > dstlen ) {
+		fprintf(stderr, "Error: decoded hex would overrun buffer.\n");
+		exit(1);
+	}
+
+	DEBUG(fprintf(stderr, "len: %d\n", r );)
+
+	for( noff=0; noff<r; noff++) {
+		dst[noff] = (hval( cleanbuf[noff*2] ) << 4) + hval( cleanbuf[noff*2+1] );
+
+		DEBUG(fprintf( stderr, "noff: %d\n", noff );)
+		DEBUG(fprintf(stderr, "A val: %x\n", (unsigned int)cleanbuf[noff]);)
+	}
+
+	DEBUG( fprintf(stderr, "process_string() Done w/%d\n", r); );
+
+	return r;
+} // }}}
+size_t load_file( char *path, char *dst, size_t dstlen ) // {{{
+{
+	FILE *fp;
+	if( 0 == strcmp( path, "-" ) ) {
+		fp = stdin;
+	} else if( NULL == ( fp = fopen( path, "rb" ) ) ) {
+		fprintf(stderr, "Error reading from file \"%s\": %s\n", path, strerror( errno ) );
+		exit(1);
+	}
+
+	int r = fread( dst, 1, dstlen, fp );
+
+	if( r == dstlen && !feof( fp ) ) {
+		fprintf(stderr, "Input file %s is larger than buffer length %d\n", path, dstlen );
+		fclose(fp);
+		exit(1);
+	}
+
+	fclose( fp );
+
+	return r;
+} // }}}
+size_t process_string( char *dst, size_t dstlen, char *src, size_t srclen ) // {{{ processes src, stores result in dst, returns length
+{
+	if( strlen( src ) >= 2 && ':' == src[1] ) {
+		switch( src[0] ) {
+			case 'f':
+				return load_file( src + 2, dst, dstlen );
+				break;
+			case 't':
+				if( dstlen < srclen - 2 ) {
+					fprintf(stderr, "Can't use >%s<, buffer overrun.\n", src );
+					exit(1);
+				}
+				memcpy( dst, src + 2, srclen - 2 );
+				return srclen - 2;
+				break;
+			case 'h':
+				return process_hex_string( dst, dstlen, src + 2, srclen - 2 );
+
+			case 'b':
+				return process_bin_string( dst, dstlen, src + 2, srclen - 2 );
+			default:
+				fprintf(stderr, "Unknown format prefix: %c\n", src[0] );
+				exit(1);
+		}
+	} else {
+		if(UseBinaryP) {
+			return process_bin_string(dst, dstlen, src, srclen);
+		}
+		else {
+			return process_hex_string(dst, dstlen, src, srclen );
+		}
+	}
+} // }}}
+void use() // {{{
 {
 	fprintf( stderr, 
-	  "use: binmay [options] [-i infile] [-o outfile] -s search [-r replacement]\n"
-	  "      search:        the string to search for\n"
-	  "      replacement:   the string to replace \"search\" with \n"
-	  "  options:\n"
-	  "      -v             verbose\n"
-	  "      -b             use binary rather than hex\n"
-	  "      -i [infile]    specify input file (default: stdin)\n"
-	  "      -p [hex]       puke raw binary\n"
-	  "      -o [outfile]   specify output file (default: stdout)\n"
-	  "      -s [hex]       string to search for (in hex, see below)\n"
-	  "      -r [hex]       replacement string (in hex, see below)\n"
-	  "      -S [hex]       search mask (see readme)\n"
-	  "      -R [hex]       replace mask (see readme)\n"
-	  "\n"
-	  "  String format: hex, upper or lower case.  Non-hex is ignored\n"
-	  "         This will work: \"021abf\"\n"
-	  "         As will this: \"02 1a BF\"\n"
-	  "         and this: \"02-1A-BF\"\n"
-	  "         and even this: \"02----=+$#@1A-BF\"\n"
-	  "            (though it's probably not a good idea)\n"
+		"use: binmay [options] [-i infile] [-o outfile] [-s search] [-r replacement]\n"
+		"      search:        the string to search for\n"
+		"      replacement:   the string to replace \"search\" with \n"
+		"  options:\n"
+		"      -v             verbose\n"
+		"      -b             use binary rather than hex (obsolete)\n"
+		"      -i [infile]    specify input file (default: stdin)\n"
+		"      -p [string]    puke raw binary\n"
+		"      -o [outfile]   specify output file (default: stdout)\n"
+		"      -s [string]    string to search for (in hex, see below)\n"
+		"      -r [string]    replacement string (in hex, see below)\n"
+		"      -S [string]    search mask (see readme)\n"
+		"      -R [string]    replace mask (see readme)\n"
+		"\n"
+		"  string format:\n"
+		"      By default search/replace/mask strings are treated as hex.\n"
+		"      Non-hex characters are ignored.  You can have strings\n"
+		"      treated as binary by using the -b switch.  You can also\n"
+		"      specify different formats as follows:\n"
+		"\n"
+		"      b:binary\n"
+		"      t:text\n"
+		"      h:hex\n"
+		"      f:file_input\n"
+		"\n"
+		"  Examples:\n"
+		"    Replace all instances of \"cows\" in the file \"cowfile\"\n"
+		"    with \"x\" and output to \"bfile\"\n"
+		"      binmay -s t:cows -r b:01111000 -i cowfile -o bfile\n"
+		"\n"
+		"    Replace all instances of 0xff00 with 0x1212:\n"
+		"      binmay -s ff00 -r 1212\n"
+		"\n"
+		"    Use masking to replace all instances of 0xffXX with 0x12XX,\n"
+		"    where XX is any value:\n"
+		"      binmay -s ff00 -S 00ff -r 1212\n"
+		"\n"
+		"  See README file for more information and examples\n"
+
 	);
-}
+} // }}}
