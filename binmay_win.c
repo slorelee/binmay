@@ -167,7 +167,7 @@ void set_search_str(struct masked_string *search, char *str)
     char buff[BUF_LEN] = {0};
     masked_string_setstr(search, str);
     /* case insensitive search */
-    if (strlen(str) >= 2 && ':' == str[1] && 'T' == str[0]) {
+    if (strlen(str) >= 2 && ':' == str[1] && ('T' == str[0] || 'U' == str[0])) {
         for (i = 0;i < search->length; i++) {
             chr = search->string[i];
             if ((chr >= 'a' && chr <= 'z') || (chr >= 'A' && chr <= 'Z')) {
@@ -807,6 +807,7 @@ size_t load_file(char *path, char *dst, size_t dstlen) // {{{
 } // }}}
 size_t process_string(char *dst, size_t dstlen, char *src, size_t srclen) // {{{ processes src, stores result in dst, returns length
 {
+    int i = 0;
     if (strlen(src) >= 2 && ':' == src[1]) {
         switch (src[0]) {
         case 'f':
@@ -820,6 +821,20 @@ size_t process_string(char *dst, size_t dstlen, char *src, size_t srclen) // {{{
             }
             memcpy(dst, src + 2, srclen - 2);
             return srclen - 2;
+            break;
+        case 'u':
+        case 'U':
+            if (dstlen < (srclen - 2) * 2) {
+                fprintf(stderr, "Can't use >%s<, buffer overrun.\n", src);
+                exit(1);
+            }
+             for (i = 2; i < srclen; i++) {
+                *dst = src[i];
+                dst++;
+                *dst = 0;
+                dst++;
+            }
+            return (srclen - 2) * 2;
             break;
         case 'h':
             return process_hex_string(dst, dstlen, src + 2, srclen - 2);
@@ -864,6 +879,8 @@ void use() // {{{
             "      b:binary\n"
             "      t:text\n"
             "      T:text (auto set mask for case insensitive searching)\n"
+            "      u:text (convert to unicode text)\n"
+            "      U:text (auto set mask for case insensitive unicode text searching)\n"
             "      h:hex\n"
             "      f:file_input\n"
             "\n"
