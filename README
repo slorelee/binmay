@@ -1,0 +1,92 @@
+Binmay - command line binary search
+Copyright (C) 2004 Sean Loaring
+
+This program is free software; you can redistribute it and/or
+modify it under the terms of the GNU General Public License
+as published by the Free Software Foundation; either version 2
+of the License, or (at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with this program; if not, write to the Free Software
+Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
+
+
+email: sloaring at tec-man dot com
+
+If you use this software then send me an email and tell me!
+
+
+Introduction
+------------
+
+Binmay is a simple, little program that searches for a string of binary in a
+file or stream and replaces it with another string of binary.
+
+Searching, Replacing, Puking
+----------------------------
+
+  Searching
+  ---------
+
+    Binmay can search for a given hex string in a binary stream and get a match
+    count.
+
+      binmay -s "ff ff af" >/dev/null
+
+    (We redirect stdout to /dev/null because stdout is where binmay dumps
+    binary output by default)
+
+    With -v (verbose) binmay will return a list of offsets from the start of
+    the stream
+
+    Search Masking
+    --------------
+
+    One can apply a bitwise mask to the search string.  This allows one to
+    search for broken-up patterns.
+
+      binmay -s "ff ff af" -S "ff f0 ff" >/dev/null
+
+    The above will search for "ff fX af" where X = (0..f)
+
+  Replacing
+  ---------
+
+    Binmay can replace the strings it searches for with other strings.
+
+    To replace all instances of "ff ff af" in infile with "aa aa aa" in outfile:
+
+      binmay -s "ff ff af" -r "aa aa aa" -i infile -o outfile
+
+    To delete all instances of "ff 00" 
+
+      binmay -s "ff 00" -r ""
+
+    To replace all instances of "ff fX af" with "aa aa aa aa aa":
+
+      binmay -s "ff ff af" -S "ff f0 ff" -r "aa aa aa aa aa"
+
+    Replace Masking
+    ---------------
+
+    If you want to keep some of the original string and only replace sections
+    of it one can mask the replace string as one can mask the search string.
+
+    To replace all instances of "ff ff XX ff" with "aa aa XX aa":
+
+      binmay -s "ff ff 00 ff" -S "00 00 ff 00" -r "aa aa 00 aa" -R "ff ff 00 ff"
+
+
+  Puking
+  ------
+
+  Binmay will convert hex into raw binary and dump it with the -p option
+
+  Do dump "45 6d 61 69 6c 20 6d 65 0a" in binary to stdout:
+    binmay -p "45 6d 61 69 6c 20 6d 65 0a"
+
