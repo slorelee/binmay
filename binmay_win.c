@@ -182,8 +182,9 @@ void set_search_str(struct masked_string *search, char *str)
 
 int main(int argc, char **argv) // {{{
 {
-    char c;
-
+    char c = '\0';
+    int keep_bkfile = 1;
+    char fname[BUF_LEN] = {'\0'};
     struct buffered_handle *in = buffered_handle_new("-", stdin, "rb");
     struct file_handle *out = file_handle_new("-", stdout, "wb");
 
@@ -193,7 +194,7 @@ int main(int argc, char **argv) // {{{
     //	infile=stdin;
     //	outfile=stdout;
 
-    char options[] = "bvp:S:R:i:o:s:r:";
+    char options[] = "bvp:S:R:i:o:u:U:s:r:";
     if (1 == argc) {
         use();
         return 0;
@@ -208,6 +209,20 @@ int main(int argc, char **argv) // {{{
             buffered_setfile(in, optarg, stdin, "rb");
             break;
         case 'o':
+            file_handle_setfile(out, optarg, stdout, "wb");
+            break;
+        case 'U':
+           keep_bkfile = 0;
+           /* fallthough */
+        case 'u':
+            strcpy(fname, optarg);
+            strcat(fname, ".org");
+            remove(fname);
+            if (rename(optarg, fname) != 0) {
+               fprintf(stderr, "Rename input file failed.\n");
+               exit(1);
+            } 
+            buffered_setfile(in, fname, stdin, "rb");
             file_handle_setfile(out, optarg, stdout, "wb");
             break;
         case 'r':
@@ -278,6 +293,10 @@ int main(int argc, char **argv) // {{{
         }
     }
 
+    if (keep_bkfile == 0 && fname[0] != '\0') {
+        fclose(in->fh->file);
+        remove(fname);
+    }
     return 0;
 } // }}}
 
@@ -856,13 +875,15 @@ size_t process_string(char *dst, size_t dstlen, char *src, size_t srclen) // {{{
 void use() // {{{
 {
     fprintf(stderr,
-            "use: binmay [options] [-i infile] [-o outfile] [-s search] [-r replacement]\n"
+            "use: binmay [options] [-i infile|-u file|-U file] [-o outfile] [-s search] [-r replacement]\n"
             "      search:        the string to search for\n"
             "      replacement:   the string to replace \"search\" with \n"
             "  options:\n"
             "      -v             verbose\n"
             "      -b             use binary rather than hex (obsolete)\n"
             "      -i [infile]    specify input file (default: stdin)\n"
+            "      -u [file]      specify infile and output file(update)\n"
+            "      -U [file]      specify infile and output file(remove backup file)\n"
             "      -p [string]    puke raw binary\n"
             "      -o [outfile]   specify output file (default: stdout)\n"
             "      -s [string]    string to search for (in hex, see below)\n"
